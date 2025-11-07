@@ -1,27 +1,42 @@
 import express from "express";
 import cors from "cors";
+import multer from "multer";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+const upload = multer(); // für file uploads
+
+// health check root
 app.get("/", (req, res) => {
   res.send("StarkSpan Backend Running");
 });
-// health check für Render + Frontend
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok", service: "starkspan-backend" });
 });
-// Beispiel Price API (wir erweitern danach um deine CNC Regeln)
-app.post("/api/quote", (req, res) => {
-  const { material, weightKg, machineTimeH, quantity } = req.body;
 
-  // tiny example calc: (nur placeholder jetzt)
-  const materialPrice = material * weightKg;
-  const machining = machineTimeH * 60;
-  const total = (materialPrice + machining) * quantity;
+// --- FILE ROUTE (PDF / STEP später OCR etc.)
+app.post("/api/quote", upload.single("file"), async (req, res) => {
+  try {
+    console.log("FILE RECEIVED:", req.file?.originalname);
 
-  res.json({ materialPrice, machining, total });
+    if (!req.file) {
+      return res.status(400).json({ error: "No file received" });
+    }
+
+    return res.json({
+      status: "ok",
+      message: "file received",
+      fileName: req.file.originalname,
+      size: req.file.size
+    });
+
+  } catch (err) {
+    console.error("API ERROR:", err);
+    return res.status(500).json({ error: "server error" });
+  }
 });
 
 const port = process.env.PORT || 3001;
