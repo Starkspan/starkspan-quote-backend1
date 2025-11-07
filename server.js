@@ -6,38 +6,38 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Multer Storage (in Memory – ideal für OCR später)
+// Speicher für Uploads (im RAM)
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// root test
 app.get("/", (req, res) => {
-  res.send("StarkSpan Backend Running");
+  res.send("✅ StarkSpan Backend läuft jetzt");
 });
 
-// health check für Render
 app.get("/health", (req, res) => {
   res.json({ status: "ok", service: "starkspan-backend" });
 });
 
-// Beispiel Price API + File Upload
 app.post("/api/quote", upload.single("file"), (req, res) => {
   try {
-    // file kommt als Buffer => später OCR / PDF Analyse drauf
-    const pdfBuffer = req.file ? req.file.buffer : null;
-
+    const fileName = req.file ? req.file.originalname : null;
     const { material, weightKg, machineTimeH, quantity } = req.body;
 
-    // tiny calc placeholder
-    const materialPrice = material * weightKg;
-    const machining = machineTimeH * 60;
-    const total = (materialPrice + machining) * quantity;
+    // Beispielberechnung (nur Demo-Werte)
+    const m = parseFloat(material || 7);        // €/kg
+    const w = parseFloat(weightKg || 2);        // kg
+    const t = parseFloat(machineTimeH || 0.5);  // Stunden
+    const q = parseInt(quantity || 1);
+
+    const materialPrice = m * w;
+    const machining = t * 60; // 60€/h angenommen
+    const total = (materialPrice + machining) * q;
 
     res.json({
-      receivedFile: req.file ? req.file.originalname : null,
+      receivedFile: fileName,
       materialPrice,
       machining,
-      total,
+      total
     });
 
   } catch (err) {
@@ -47,4 +47,4 @@ app.post("/api/quote", upload.single("file"), (req, res) => {
 });
 
 const port = process.env.PORT || 3001;
-app.listen(port, () => console.log("StarkSpan Backend live port " + port));
+app.listen(port, () => console.log("✅ StarkSpan Backend live on port " + port));
