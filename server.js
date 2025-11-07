@@ -4,7 +4,13 @@ import multer from "multer";
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "https://starkspan-quote-backend1.onrender.com"
+  ],
+  methods: ["GET","POST"]
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
