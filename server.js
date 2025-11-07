@@ -6,14 +6,20 @@ import { execFile } from "child_process";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
+
 const require = createRequire(import.meta.url);
 const { createWorker } = require("tesseract.js");
 
 const app = express();
-app.use(cors());
+
+/* ---------- CORS: erlaubt alles + Preflight ---------- */
+app.use(cors({ origin: "*", methods: ["GET","POST","OPTIONS"], allowedHeaders: ["Content-Type"] }));
+app.options("*", cors());
+
+/* ---------- JSON Parser ---------- */
 app.use(express.json());
 
-// ====== Konfiguration ======
+/* ---------- Konstanten ---------- */
 const pricePerKg = {
   aluminium: 7.0,
   edelstahl: 7.5,
@@ -36,19 +42,23 @@ const densities = {
   kupfer: 8.96,
 };
 
-// Multer speichert Uploads in /tmp (Render kompatibel)
-const upload = multer({ dest: os.tmpdir() });
+/* ---------- Upload: /tmp (Render-kompatibel) ---------- */
+const upload = multer({
+  dest: os.tmpdir(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+  fileFilter: (req, file, cb) => {
+    const ok =
+      /pdf$/i.test(file.mimetype) ||
+      /^image\/(png|jpe?g)$/i.test(file.mimetype) ||
+      /\.pdf$/i.test(file.originalname) ||
+      /\.(png|jpe?g)$/i.test(file.originalname);
+    cb(ok ? null : new Error("Unsupported file type"), ok);
+  },
+});
 
-// ====== Helfer ======
-function toNum(s) {
-  if (!s) return null;
-  // 12,5 oder 12.5 -> 12.5
-  return Number(String(s).replace(",", "."));
-}
-
-function round2(x) {
-  return Math.round(x * 100) / 100;
-}
+/* ---------- Helpers ---------- */
+const toNum = (s) => (s == null ? null : Number(String(s).replace(",", ".")));
+const round2 = (x) => Math.round(x * 100) / 100;
 
 function pickMaterialKey(raw) {
   if (!raw) return "aluminium";
@@ -63,36 +73,28 @@ function pickMaterialKey(raw) {
   return "aluminium";
 }
 
-// PD F→PNG via poppler-utils (pdftoppm)
+/* ---------- PDF → PNG (erste Seite) ---------- */
 async function pdfToPng(pdfPath) {
-  const outBase = path.join(os.tmpdir(), "page_ocr");
+  const outBase = path.join(os.tmpdir(), `page_ocr_${Date.now()}`);
   const outPng = `${outBase}.png`;
-
   return new Promise((resolve, reject) => {
-    // -singlefile -> nur erste Seite
     execFile(
       "pdftoppm",
       ["-png", "-singlefile", "-scale-to", "2000", pdfPath, outBase],
-      (err) => {
-        if (err) return reject(err);
-        resolve(outPng);
-      }
+      (err) => (err ? reject(err) : resolve(outPng))
     );
   });
 }
 
-// OCR auf PNG mit tesseract.js
+/* ---------- OCR (Tesseract) ---------- */
 async function ocrPng(pngPath) {
-  const worker = await createWorker({
-    logger: () => {}, // stille
-  });
+  const worker = await createWorker({ logger: () => {} });
   try {
     await worker.loadLanguage("eng");
     await worker.initialize("eng");
-    // leichte Hinting: Maße, mm, Ø, x / ×
     await worker.setParameters({
-      tessedit_char_whitelist:
-        "0123456789.,xX×ØømM ",
+      // mm/Ø/x/× etc.
+      tessedit_char_whitelist: "0123456789.,xX×ØømM ",
       preserve_interword_spaces: "1",
     });
     const { data } = await worker.recognize(pngPath);
@@ -102,55 +104,30 @@ async function ocrPng(pngPath) {
   }
 }
 
-// Maße aus Text fischen
+/* ---------- Maße aus OCR-Text abgreifen ---------- */
 function extractDimsFromText(txt) {
-  // Klassiker:
-  // 100x50x10 mm  |  100 x 50 x 10mm | Ø20 x 100 | Ø20x100mm
+  if (!txt) return null;
   const t = txt.replace(/\s+/g, " ").toLowerCase();
 
-  // Ø / Durchmesser?
-  const reDiaLen =
-    /[øØ]\s*([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s*([0-9]+(?:[.,][0-9]+)?)\s*mm?/i;
+  // ØD x L   (z.B. Ø20 x 100)
+  const reDiaLen = /[øØ]\s*([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s*([0-9]+(?:[.,][0-9]+)?)\s*mm?/i;
   const md = t.match(reDiaLen);
   if (md) {
-    return {
-      shape: "cylinder",
-      D_mm: toNum(md[1]),
-      L_mm: toNum(md[2]),
-      B_mm: null,
-      H_mm: null,
-      source: "ocr",
-    };
+    return { shape: "cylinder", D_mm: toNum(md[1]), L_mm: toNum(md[2]), B_mm: null, H_mm: null, source: "ocr" };
   }
 
-  // LxBxH
-  const reLxBxH =
-    /([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s*([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s*([0-9]+(?:[.,][0-9]+)?)\s*mm?/i;
+  // L x B x H
+  const reLxBxH = /([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s*([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s*([0-9]+(?:[.,][0-9]+)?)\s*mm?/i;
   const m3 = t.match(reLxBxH);
   if (m3) {
-    return {
-      shape: "block",
-      L_mm: toNum(m3[1]),
-      B_mm: toNum(m3[2]),
-      H_mm: toNum(m3[3]),
-      D_mm: null,
-      source: "ocr",
-    };
+    return { shape: "block", L_mm: toNum(m3[1]), B_mm: toNum(m3[2]), H_mm: toNum(m3[3]), D_mm: null, source: "ocr" };
   }
 
-  // LxB
-  const reLxB =
-    /([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s*([0-9]+(?:[.,][0-9]+)?)\s*mm?/i;
+  // L x B
+  const reLxB = /([0-9]+(?:[.,][0-9]+)?)\s*[x×]\s*([0-9]+(?:[.,][0-9]+)?)\s*mm?/i;
   const m2 = t.match(reLxB);
   if (m2) {
-    return {
-      shape: "plate",
-      L_mm: toNum(m2[1]),
-      B_mm: toNum(m2[2]),
-      H_mm: null,
-      D_mm: null,
-      source: "ocr",
-    };
+    return { shape: "plate", L_mm: toNum(m2[1]), B_mm: toNum(m2[2]), H_mm: null, D_mm: null, source: "ocr" };
   }
 
   return null;
@@ -166,12 +143,7 @@ function computeVolumeAndWeight(dim, materialKey) {
     const r = dim.D_mm / 2;
     volume_mm3 = Math.PI * r * r * dim.L_mm;
     geometry = "cylinder";
-  } else if (
-    (dim.shape === "block" || dim.shape === "plate") &&
-    dim.L_mm &&
-    dim.B_mm &&
-    dim.H_mm
-  ) {
+  } else if ((dim.shape === "block" || dim.shape === "plate") && dim.L_mm && dim.B_mm && dim.H_mm) {
     volume_mm3 = dim.L_mm * dim.B_mm * dim.H_mm;
     geometry = "block";
   }
@@ -180,20 +152,19 @@ function computeVolumeAndWeight(dim, materialKey) {
     return { volume_cm3: null, weightKg: null, geometry: "unknown" };
   }
 
-  // mm³ -> cm³
-  const volume_cm3 = volume_mm3 / 1000.0;
+  const volume_cm3 = volume_mm3 / 1000.0; // mm³ -> cm³
   const rho = densities[materialKey] ?? 2.7; // g/cm³
   const weight_g = volume_cm3 * rho;
   const weightKg = weight_g / 1000.0;
 
-  return {
-    volume_cm3: round2(volume_cm3),
-    weightKg: round2(weightKg),
-    geometry,
-  };
+  return { volume_cm3: round2(volume_cm3), weightKg: round2(weightKg), geometry };
 }
 
-// ====== ROUTES ======
+/* ---------- Routes ---------- */
+app.get("/", (req, res) => {
+  res.type("text").send("StarkSpan Backend Running");
+});
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok", service: "starkspan-backend", ocr: "tesseract+pdftoppm" });
 });
@@ -207,49 +178,46 @@ app.get("/health", (req, res) => {
  *  - machineTimeH (optional, default 0.5)
  */
 app.post("/api/quote", upload.single("file"), async (req, res) => {
+  let pngPath;
   try {
     const file = req.file;
     const userMaterial = req.body.material;
     const quantity = Number(req.body.quantity || 1);
     const machineTimeH = Number(String(req.body.machineTimeH || "0.5").replace(",", "."));
 
-    if (!file) {
-      return res.status(400).json({ error: "no file uploaded" });
-    }
+    if (!file) return res.status(400).json({ error: "no file uploaded" });
 
     const materialKey = pickMaterialKey(userMaterial);
-    let textForParsing = "";
-    let dims = null;
-    let pngPath = null;
 
-    // 1) Wenn PDF → konvertieren, sonst (PNG/JPG) direkt OCR
-    if (file.mimetype === "application/pdf" || file.originalname?.toLowerCase().endsWith(".pdf")) {
-      pngPath = await pdfToPng(file.path);
+    // 1) OCR vorbereiten
+    let textForParsing = "";
+    if (file.mimetype === "application/pdf" || /\.pdf$/i.test(file.originalname || "")) {
+      try {
+        pngPath = await pdfToPng(file.path);
+      } catch (e) {
+        // pdftoppm fehlt -> klarer Fehlertext
+        throw new Error("pdftoppm not available (install via apt.txt: poppler-utils).");
+      }
       textForParsing = await ocrPng(pngPath);
     } else {
-      // Bild direkt
       textForParsing = await ocrPng(file.path);
     }
 
-    // 2) Maße fischen
-    dims = extractDimsFromText(textForParsing);
+    // 2) Maße parsen
+    const dims = extractDimsFromText(textForParsing);
+    const needsManual = !dims;
 
-    // 3) wenn OCR nichts gefunden hat → Hinweis
-    let needsManual = false;
-    if (!dims) needsManual = true;
-
-    // 4) Volumen / Gewicht
+    // 3) Volumen / Gewicht
     const { volume_cm3, weightKg, geometry } = computeVolumeAndWeight(dims, materialKey);
 
-    // 5) Materialkosten
+    // 4) Preise
     const pKg = pricePerKg[materialKey] ?? 7.0;
     const materialPrice = weightKg != null ? round2(weightKg * pKg) : null;
 
-    // 6) Bearbeitung (einfacher Ansatz aus deinem Prototyp: 30 €/h)
-    const machining = round2((machineTimeH || 0) * 60); // z.B. 0.5h -> 30 €
+    // 5) Bearbeitung (0.5h -> 30€)
+    const machining = round2((machineTimeH || 0) * 60);
 
-    const totalPerPiece =
-      (materialPrice != null ? materialPrice : 0) + (machining != null ? machining : 0);
+    const totalPerPiece = (materialPrice ?? 0) + (machining ?? 0);
     const totalAll = round2(totalPerPiece * (quantity || 1));
 
     res.json({
@@ -258,12 +226,7 @@ app.post("/api/quote", upload.single("file"), async (req, res) => {
       quantity,
       geometry,
       geometrySource: dims?.source || "ocr",
-      dims: dims || {
-        D_mm: null,
-        L_mm: null,
-        B_mm: null,
-        H_mm: null,
-      },
+      dims: dims || { D_mm: null, L_mm: null, B_mm: null, H_mm: null },
       volume_cm3,
       weightKg,
       pricePerKg: pKg,
@@ -273,21 +236,19 @@ app.post("/api/quote", upload.single("file"), async (req, res) => {
       totalAll,
       needsManual,
     });
-
-    // Cleanup
-    try {
-      if (pngPath) await fs.unlink(pngPath);
-      await fs.unlink(file.path);
-    } catch (_) {}
-
   } catch (err) {
     console.error("API ERROR:", err);
-    res.status(500).json({ error: "OCR/Parse failed", detail: String(err && err.message || err) });
+    res.status(500).json({
+      error: "OCR/Parse failed",
+      detail: String(err?.message || err),
+    });
+  } finally {
+    // Cleanup
+    try { if (pngPath) await fs.unlink(pngPath); } catch {}
+    try { if (req.file?.path) await fs.unlink(req.file.path); } catch {}
   }
 });
 
-// ====== Start ======
+/* ---------- Start ---------- */
 const port = process.env.PORT || 3001;
-app.listen(port, () => {
-  console.log("StarkSpan Backend live port " + port);
-});
+app.listen(port, () => console.log("StarkSpan Backend live port " + port));
