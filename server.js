@@ -6,36 +6,43 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const upload = multer(); // für file uploads
+// Multer Storage (in Memory – ideal für OCR später)
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
 
-// health check root
+// root test
 app.get("/", (req, res) => {
   res.send("StarkSpan Backend Running");
 });
 
+// health check für Render
 app.get("/health", (req, res) => {
   res.json({ status: "ok", service: "starkspan-backend" });
 });
 
-// --- FILE ROUTE (PDF / STEP später OCR etc.)
-app.post("/api/quote", upload.single("file"), async (req, res) => {
+// Beispiel Price API + File Upload
+app.post("/api/quote", upload.single("file"), (req, res) => {
   try {
-    console.log("FILE RECEIVED:", req.file?.originalname);
+    // file kommt als Buffer => später OCR / PDF Analyse drauf
+    const pdfBuffer = req.file ? req.file.buffer : null;
 
-    if (!req.file) {
-      return res.status(400).json({ error: "No file received" });
-    }
+    const { material, weightKg, machineTimeH, quantity } = req.body;
 
-    return res.json({
-      status: "ok",
-      message: "file received",
-      fileName: req.file.originalname,
-      size: req.file.size
+    // tiny calc placeholder
+    const materialPrice = material * weightKg;
+    const machining = machineTimeH * 60;
+    const total = (materialPrice + machining) * quantity;
+
+    res.json({
+      receivedFile: req.file ? req.file.originalname : null,
+      materialPrice,
+      machining,
+      total,
     });
 
   } catch (err) {
     console.error("API ERROR:", err);
-    return res.status(500).json({ error: "server error" });
+    res.status(500).json({ error: "processing error" });
   }
 });
 
