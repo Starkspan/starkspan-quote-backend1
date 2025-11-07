@@ -8,7 +8,10 @@ app.use(express.json());
 app.get("/", (req, res) => {
   res.send("StarkSpan Backend Running");
 });
-
+// health check für Render + Frontend
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", service: "starkspan-backend" });
+});
 // Beispiel Price API (wir erweitern danach um deine CNC Regeln)
 app.post("/api/quote", (req, res) => {
   const { material, weightKg, machineTimeH, quantity } = req.body;
